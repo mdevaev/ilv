@@ -11,4 +11,4 @@ serial:
 	platformio serialports monitor
 
 clean:
-	rm -rf .pioenvs .piolibdeps
+	rm -rf .pio

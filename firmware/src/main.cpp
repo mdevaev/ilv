@@ -2,134 +2,110 @@
 #include <TimerOne.h>
 #include <digitalWriteFast.h>
 
+
 #define INLINE inline __attribute__((always_inline))
-#define ASYMMETRICAL_FILAMENT 10
 
 
-const uint8_t CLOCK_PIN = A1;
-const uint8_t BLANK_PIN = A2;
-const uint8_t LOAD_PIN = A0;
-const uint8_t GRIDS_PIN = 9;
-const uint8_t DRIVERS_PINS[6] = {12, 11, 10, 8, 7, 6};
-const uint8_t FILAMENT_ENABLE_PIN = A3;
-const uint8_t FILAMENT_AC_PINS[2] = {A4, A5};
-const uint8_t READY_PIN = 13;
+#define CMD_SERIAL Serial
+#define CMD_SERIAL_SPEED 115200
 
-const uint16_t COLUMNS_MASKS[16] = {
-	0b1000000000000000,
-	0b0100000000000000,
-	0b0010000000000000,
-	0b0001000000000000,
-	0b0000100000000000,
-	0b0000010000000000,
-	0b0000001000000000,
-	0b0000000100000000,
-	0b0000000010000000,
-	0b0000000001000000,
-	0b0000000000100000,
-	0b0000000000010000,
-	0b0000000000001000,
-	0b0000000000000100,
-	0b0000000000000010,
-	0b0000000000000001,
-};
+#define FILAMENT_ASYMMETRICAL 4
+#define FILAMENT_PULSE_TIME 100 // Микросекунд
 
 
+const uint8_t PIN_CLOCK = A0;
+const uint8_t PIN_BLANK = A2;
+const uint8_t PIN_LOAD = A1;
+
+const uint8_t PIN_GRID_DRIVER = 6;
+const uint8_t PIN_PIXEL_DRIVERS[6] = {9, 8, 7, 5, 4, 3};
+
+const uint8_t PIN_PULSE_FILAMENT = 100;
+const uint8_t PIN_ENABLE_DCDCS = A3;
+
+
+// -----------------------------------------------------------------------------
 static uint16_t screens[2][120];
 static uint8_t current_screen = 0;
 static uint8_t next_screen = 1;
-static uint8_t translated_pixel_indexes[105];
+
+static uint8_t pixel_map[105];
+static uint16_t column_masks[16];
 
 
-INLINE void writeData(uint8_t column, uint16_t screen[]) {
-	for (uint8_t index = 0; index < 20; ++index) {
-		digitalWriteFast(GRIDS_PIN, column == index - 4);
+// -----------------------------------------------------------------------------
+INLINE void writeColumnData(uint8_t column, uint16_t screen[]) {
+	for (uint8_t pin = 0; pin < 20; ++pin) {
+		digitalWriteFast(PIN_GRID_DRIVER, column == pin - 2);
 		for (uint8_t driver = 1; driver <= 6; ++driver) {
-			digitalWriteFast(DRIVERS_PINS[driver - 1], (bool)(screen[(driver * 20 - 20) + index] & COLUMNS_MASKS[column]));
+			digitalWriteFast(PIN_PIXEL_DRIVERS[driver - 1], (bool)(screen[(driver * 20 - 20) + pin] & column_masks[column]));
 		}
-		digitalWriteFast(CLOCK_PIN, HIGH);
-		digitalWriteFast(CLOCK_PIN, LOW);
+		digitalWriteFast(PIN_CLOCK, HIGH);
+		digitalWriteFast(PIN_CLOCK, LOW);
 	}
-	digitalWriteFast(LOAD_PIN, HIGH);
-	digitalWriteFast(LOAD_PIN, LOW);
+	digitalWriteFast(PIN_LOAD, HIGH);
+	digitalWriteFast(PIN_LOAD, LOW);
 }
 
-INLINE void drawColumn() {
+INLINE void drawColumn(void) {
 	static uint8_t column;
-	writeData(column, screens[current_screen]);
+	writeColumnData(column, screens[current_screen]);
 	column = (column == 15 ? 0 : column + 1);
 }
 
 void pulseFilament() {
-#ifdef ASYMMETRICAL_FILAMENT
-	static uint8_t filament_mode;
-#else
-	static bool filament_mode;
-#endif
-	digitalWriteFast(FILAMENT_AC_PINS[0], filament_mode);
-	digitalWriteFast(FILAMENT_AC_PINS[1], !filament_mode);
-#ifdef ASYMMETRICAL_FILAMENT
-	filament_mode = (filament_mode == ASYMMETRICAL_FILAMENT ? 0 : filament_mode + 1);
-#else
-	filament_mode = !filament_mode;
-#endif
+#	ifdef FILAMENT_ASYMMETRICAL
+	static uint8_t mode;
+#	else
+	static bool mode;
+#	endif
+
+	digitalWriteFast(PIN_PULSE_FILAMENT, !mode);
+#	ifdef FILAMENT_ASYMMETRICAL
+	mode = (mode == FILAMENT_ASYMMETRICAL ? 0 : mode + 1);
+#	else
+	mode = !mode;
+#	endif
 }
 
-void buildTranslatedPixelIndexes() {
+void buildPixelMap() {
+	// Номер пикселя по порядку не соответствует номеру пикселя в распиновке экрана,
+	// поэтому мы строим карту соответствий виртуальной позиции пикселя реальной распиновке.
 	for (uint8_t index = 0; index < 105; ++index) {
 		if (index < 35) {
-			translated_pixel_indexes[index] = 15 + ((index % 2) ? (51 - (index + 1) / 2) : (51 + index / 2));
+			pixel_map[index] = 15 + ((index % 2) ? (51 - (index + 1) / 2) : (51 + index / 2));
 		} else if (index < 70) {
-			translated_pixel_indexes[index] = 15 + ((index % 2) ? (51 + (index + 1) / 2) : (51 - index / 2));
+			pixel_map[index] = 15 + ((index % 2) ? (51 + (index + 1) / 2) : (51 - index / 2));
 		} else {
-			translated_pixel_indexes[index] = 15 + ((index % 2) ? (52 - (index + 1) / 2) : (52 + index / 2));
+			pixel_map[index] = 15 + ((index % 2) ? (52 - (index + 1) / 2) : (52 + index / 2));
 		}
 	}
 }
 
-
-void setup() {
-	pinModeFast(FILAMENT_AC_PINS[0], OUTPUT);
-	pinModeFast(FILAMENT_AC_PINS[1], OUTPUT);
-	pinModeFast(FILAMENT_ENABLE_PIN, OUTPUT);
-
-	Timer1.initialize(200); // 500
-	Timer1.attachInterrupt(pulseFilament);
-
-	pinModeFast(CLOCK_PIN, OUTPUT);
-	pinModeFast(BLANK_PIN, OUTPUT);
-	pinModeFast(LOAD_PIN, OUTPUT);
-	pinModeFast(GRIDS_PIN, OUTPUT);
-	for (uint8_t driver = 0; driver < 6; ++driver) {
-		pinModeFast(DRIVERS_PINS[driver], OUTPUT);
+void buildColumnMasks() {
+	// 0 = 0b1000000000000000
+	// 1 = 0b0100000000000000
+	// ... etc.
+	for (int8_t index = 0; index < 16; ++index) {
+		column_masks[index] = (uint16_t)1 << (15 - index);
 	}
-
-	digitalWriteFast(BLANK_PIN, HIGH);
-	delay(500);
-	digitalWriteFast(BLANK_PIN, LOW);
-
-	Serial.begin(115200);
-
-	buildTranslatedPixelIndexes();
-
-	pinModeFast(READY_PIN, OUTPUT);
-	digitalWriteFast(READY_PIN, HIGH);
 }
 
 
-INLINE void cmdFilament() {
+// -----------------------------------------------------------------------------
+INLINE void cmdDcdcs() {
 	int8_t enabled;
-	while ((enabled = Serial.read()) == -1) {
+	while ((enabled = CMD_SERIAL.read()) == -1) {
 		drawColumn();
 	}
-	digitalWriteFast(FILAMENT_ENABLE_PIN, enabled);
+	digitalWriteFast(PIN_ENABLE_DCDCS, enabled);
 }
 
 INLINE void cmdScreen() {
 	for (uint8_t index = 0;;) {
-		while (Serial.available() >= 2) {
-			screens[next_screen][translated_pixel_indexes[index]] = (uint16_t)Serial.read() << 8;
-			screens[next_screen][translated_pixel_indexes[index]] |= (uint16_t)Serial.read();
+		while (CMD_SERIAL.available() >= 2) {
+			screens[next_screen][pixel_map[index]] = (uint16_t)CMD_SERIAL.read() << 8;
+			screens[next_screen][pixel_map[index]] |= (uint16_t)CMD_SERIAL.read();
 			if (index % 15 == 0) {
 				drawColumn();
 			}
@@ -146,10 +122,37 @@ INLINE void cmdScreen() {
 	}
 }
 
+void setup() {
+	buildPixelMap();
+	buildColumnMasks();
+
+	pinModeFast(PIN_PULSE_FILAMENT, OUTPUT);
+	pinModeFast(PIN_ENABLE_DCDCS, OUTPUT);
+
+	Timer1.initialize(FILAMENT_PULSE_TIME);
+	Timer1.attachInterrupt(pulseFilament);
+
+	pinModeFast(PIN_CLOCK, OUTPUT);
+	pinModeFast(PIN_BLANK, OUTPUT);
+	pinModeFast(PIN_LOAD, OUTPUT);
+	pinModeFast(PIN_GRID_DRIVER, OUTPUT);
+	for (uint8_t driver = 0; driver < 6; ++driver) {
+		pinModeFast(PIN_PIXEL_DRIVERS[driver], OUTPUT);
+	}
+
+	digitalWriteFast(PIN_BLANK, HIGH);
+	delay(250);
+
+	CMD_SERIAL.begin(CMD_SERIAL_SPEED);
+
+	digitalWriteFast(PIN_BLANK, LOW);
+	delay(250);
+}
+
 void loop() {
-	while (true) {  // fast
-		switch (Serial.read()) {
-			case 0: cmdFilament(); break;
+	while (true) {  // Так быстрее
+		switch (CMD_SERIAL.read()) {
+			case 0: cmdDcdcs(); break;
 			case 1: cmdScreen(); break;
 			default: break;
 		}

@@ -1,3 +1,2 @@
-/firmware/.pioenvs
-/firmware/.piolibdeps
+/firmware/.pio*
 __pycache__
