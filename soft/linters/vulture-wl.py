@@ -1,0 +1,2 @@
+Font.getsize
+Font.getmask
